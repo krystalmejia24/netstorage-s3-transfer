@@ -7,7 +7,6 @@ import base64
 import os
 import threading
 from sopen.smart_open import open as sopen
-from akamai.netstorage import Netstorage, NetstorageError
 from dotenv import load_dotenv
 from urllib.parse import quote
 from ftplib import FTP
