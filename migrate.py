@@ -13,6 +13,12 @@ from dotenv import load_dotenv
 from urllib.parse import quote
 from ftplib import FTP
 
+import logging
+"""
+logging.basicConfig(level=logging.DEBUG,
+                    format='(%(threadName)-10s) %(message)s',
+                    )
+"""
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 
@@ -39,8 +45,8 @@ session = boto3.Session(
 
 #threads
 semaphore = threading.Semaphore(100)
-
 files = []
+transfered = []
 
 def auth(path):
     #path = quote(path)
@@ -66,33 +72,30 @@ def destination(file):
     path = file.replace(root, "")
     return "s3://{0}/test{1}".format(s3_bucket, path)
 
-def transfer(file=""):
-    url = "http://{0}{1}".format(ns_host, file)
-    bucket = destination(file)
-    with sopen(url, 'rb', transport_params=dict(headers=auth(file))) as fin:
-        with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
-          print(f'Transfering {url} to {bucket}')
-          for line in fin:
-            fout.write(line)
-    semaphore.release()
+def transfer(file=None):
+    if file:
+        file = "/{0}".format(file)
+        url = "http://{0}{1}".format(ns_host, file)
+        bucket = destination(file)
+        with sopen(url, 'rb', transport_params=dict(headers=auth(file))) as fin:
+            with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
+                print(f'Transfering {url} to {bucket}')
+                for line in fin:
+                    fout.write(line)
+        transfered.append(file)
+        semaphore.release()
 
-def find(folder=""):
-    contents = ftp.nlst(folder)
-    contents.sort(reverse=True)
-    return contents
-
-
-def start(folder=""):
-    for item in find(folder):
-        dir = "{0}/{1}".format(folder, item)
-        if ".mp4" not in item:
-            #print(f'No files in {dir}')
-            start(dir)
-        else:
-            semaphore.acquire()
-            t = threading.Thread(target=transfer, args=(dir,))
-            t.start()
-            print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
+def manage_threads(file=False): #TODO move threads to array to properly manage
+    if file:
+        print("FILES FOUND: {0}".format(len(files)))
+        print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
+        semaphore.acquire()
+        name = file.split('/')[-1]
+        t = threading.Thread(name=name, target=transfer, args=(file,))
+        t.start()
+        print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
+    else:
+        print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
 
 def iterate(folder=""):
     list_opts = {
@@ -102,18 +105,21 @@ def iterate(folder=""):
     }
     status, response = ns.list(folder, list_opts)
     tree = ETree.fromstring(response.content)
-    resume = tree.find('resume').get('start')
-    for child in tree:
-        if child.get('type') == 'file':
-            files.append(child.get('name')) ## add thread
+    try:
+        resume = tree.find('resume').get('start')
+        for child in tree:
+            if child.get('type') == 'file':
+                file = child.get('name')
+                manage_threads(file)
+                files.append(file)
+    except AttributeError:
+        resume = None
 
-    return {'resume': resume, 'files': files}
+    return resume
 
 if __name__ == "__main__":
-    #start(root)
     dir = iterate(root)
-    while dir['resume']:
-        print(dir['resume'])
-        print(len(files))
-        dir = iterate(dir['resume'])
+    while dir or len(files) > len(transfered):
+        if dir:
+            dir = iterate(dir)
     print('done')
