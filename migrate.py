@@ -44,7 +44,9 @@ session = boto3.Session(
 )
 
 #threads
-semaphore = threading.Semaphore(100)
+jobs = int(os.getenv("JOBS"))
+semaphore = threading.Semaphore(jobs)
+threads = []
 files = []
 transfered = []
 
@@ -83,17 +85,14 @@ def transfer(file=None):
                 for line in fin:
                     fout.write(line)
         transfered.append(file)
+        print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
         semaphore.release()
 
 def manage_threads(file=False): #TODO move threads to array to properly manage
     if file:
-        print("FILES FOUND: {0}".format(len(files)))
-        print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
-        semaphore.acquire()
         name = file.split('/')[-1]
         t = threading.Thread(name=name, target=transfer, args=(file,))
-        t.start()
-        print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
+        threads.append(t)
     else:
         print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
 
@@ -110,8 +109,8 @@ def iterate(folder=""):
         for child in tree:
             if child.get('type') == 'file':
                 file = child.get('name')
-                manage_threads(file)
                 files.append(file)
+                manage_threads(file)
     except AttributeError:
         resume = None
 
@@ -119,7 +118,11 @@ def iterate(folder=""):
 
 if __name__ == "__main__":
     dir = iterate(root)
-    while dir or len(files) > len(transfered):
-        if dir:
-            dir = iterate(dir)
+    while True:
+        if len(files) > jobs:
+            for thread in threads:
+                semaphore.acquire()
+                thread.start() 
+        if not iterate(dir):
+            break
     print('done')
