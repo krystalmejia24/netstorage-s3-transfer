@@ -81,11 +81,12 @@ def transfer(file=None):
         bucket = destination(file)
         with sopen(url, 'rb', transport_params=dict(headers=auth(file))) as fin:
             with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
-                print(f'Transfering {url} to {bucket}')
+                manage_threads()
                 for line in fin:
                     fout.write(line)
         transfered.append(file)
         print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
+        print(f'Transfering {url} to {bucket}')
         semaphore.release()
 
 def manage_threads(file=False): #TODO move threads to array to properly manage
