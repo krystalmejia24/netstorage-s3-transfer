@@ -6,6 +6,8 @@ import time
 import base64
 import os
 import threading
+from akamai.netstorage import Netstorage, NetstorageError
+from xml.etree import ElementTree as ETree
 from sopen.smart_open import open as sopen
 from dotenv import load_dotenv
 from urllib.parse import quote
@@ -26,6 +28,7 @@ ftp = FTP(
 ns_host = os.getenv("NS_HOST")
 key = os.getenv("NS_KEY")
 keyname = os.getenv("NS_KEYNAME")
+ns = Netstorage(ns_host, keyname, key)
 
 #s3
 s3_bucket = os.getenv("S3_BUCKET")
@@ -35,7 +38,9 @@ session = boto3.Session(
 )
 
 #threads
-semaphore = threading.Semaphore(5)
+semaphore = threading.Semaphore(100)
+
+files = []
 
 def auth(path):
     #path = quote(path)
@@ -81,13 +86,34 @@ def start(folder=""):
     for item in find(folder):
         dir = "{0}/{1}".format(folder, item)
         if ".mp4" not in item:
-            print(f'No files in {dir}')
+            #print(f'No files in {dir}')
             start(dir)
         else:
             semaphore.acquire()
             t = threading.Thread(target=transfer, args=(dir,))
             t.start()
+            print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
 
+def iterate(folder=""):
+    list_opts = {
+        'max_entries': 1000,
+        'encoding': 'utf-8',
+        'end': root + '0'
+    }
+    status, response = ns.list(folder, list_opts)
+    tree = ETree.fromstring(response.content)
+    resume = tree.find('resume').get('start')
+    for child in tree:
+        if child.get('type') == 'file':
+            files.append(child.get('name')) ## add thread
+
+    return {'resume': resume, 'files': files}
 
 if __name__ == "__main__":
-    start(root)
+    #start(root)
+    dir = iterate(root)
+    while dir['resume']:
+        print(dir['resume'])
+        print(len(files))
+        dir = iterate(dir['resume'])
+    print('done')
