@@ -72,24 +72,28 @@ def auth(path):
 
 def destination(file):
     path = file.replace(root, "")
-    return "s3://{0}/test{1}".format(s3_bucket, path)
+    return "s3://{0}/test/local{1}".format(s3_bucket, path)
 
 def transfer(file=None):
     if file:
         file = "/{0}".format(file)
         url = "http://{0}{1}".format(ns_host, file)
         bucket = destination(file)
-        with sopen(url, 'rb', transport_params=dict(headers=auth(file))) as fin:
-            with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
-                manage_threads()
-                for line in fin:
-                    fout.write(line)
-        transfered.append(file)
-        print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
-        print(f'Transfering {url} to {bucket}')
-        semaphore.release()
+        try:
+            with sopen(url, 'rb', transport_params=dict(headers=auth(file), buffer_size=1024*500)) as fin:
+                with sopen(bucket, 'wb', transport_params=dict(session=session, buffer_size=500 * 1024**2)) as fout:
+                    print(f'Transfering {url}')
+                    for line in fin:
+                        fout.write(line)
+            transfered.append(file)
+            print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
+            manage_threads()
+            semaphore.release()
+        except Exception as e:
+            print(e)
 
-def manage_threads(file=False): #TODO move threads to array to properly manage
+
+def manage_threads(file=False):
     if file:
         name = file.split('/')[-1]
         t = threading.Thread(name=name, target=transfer, args=(file,))
@@ -118,12 +122,16 @@ def iterate(folder=""):
     return resume
 
 if __name__ == "__main__":
-    dir = iterate(root)
     while True:
+        dir = iterate(root)
         if len(files) > jobs:
+            print("FILES FOUND: {0}".format(len(files)))
             for thread in threads:
+                thread.start()
                 semaphore.acquire()
-                thread.start() 
-        if not iterate(dir):
+            for thread in threads:
+                thread.join()
+                threads.remove(thread)
+        if not dir and len(files) == len(transfered):
             break
     print('done')
