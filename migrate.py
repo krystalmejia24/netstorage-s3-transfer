@@ -6,31 +6,22 @@ import time
 import base64
 import os
 import threading
+import logging
 from akamai.netstorage import Netstorage, NetstorageError
 from xml.etree import ElementTree as ETree
-from sopen.smart_open import open as sopen
+from smart_open import open as sopen
 from dotenv import load_dotenv
-from urllib.parse import quote
-from ftplib import FTP
 
-import logging
-"""
-logging.basicConfig(level=logging.DEBUG,
+
+logging.basicConfig(level=logging.ERROR,
                     format='(%(threadName)-10s) %(message)s',
                     )
-"""
+
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 
-#ftp
+#netstorage 
 root = "/{0}".format(os.getenv("NS_PATH"))
-ftp = FTP(
-    os.getenv("FTP_HOST"),
-    os.getenv("FTP_USR"),
-    os.getenv("FTP_PWD")
-)
-
-#netstorage
 ns_host = os.getenv("NS_HOST")
 key = os.getenv("NS_KEY")
 keyname = os.getenv("NS_KEYNAME")
@@ -51,7 +42,6 @@ files = []
 transfered = []
 
 def auth(path):
-    #path = quote(path)
     acs_action = 'version=1&action=download'
     acs_auth_data = "5, 0.0.0.0, 0.0.0.0, {0}, {1}, {2}".format(
         int(time.time()), 
@@ -81,17 +71,19 @@ def transfer(file=None):
         bucket = destination(file)
         try:
             with sopen(url, 'rb', transport_params=dict(headers=auth(file), buffer_size=1024*500)) as fin:
-                with sopen(bucket, 'wb', transport_params=dict(session=session, buffer_size=500 * 1024**2)) as fout:
-                    print(f'Transfering {url}')
-                    for line in fin:
-                        fout.write(line)
+                with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
+                    while True:
+                        buffer = fin.read(1024*2)
+                        if not buffer:
+                            fin.close()
+                            break
+                        else:
+                            fout.write(buffer)
             transfered.append(file)
-            print("FILES TRANSFERED COUNT: {0}".format(len(transfered)))
-            manage_threads()
+            files.remove(file[1:])
             semaphore.release()
         except Exception as e:
             print(e)
-
 
 def manage_threads(file=False):
     if file:
@@ -99,11 +91,20 @@ def manage_threads(file=False):
         t = threading.Thread(name=name, target=transfer, args=(file,))
         threads.append(t)
     else:
+        for thread in threads[:jobs]:
+            thread.start()
+            semaphore.acquire()
+        for thread in threads[:jobs]:
+            thread.join()
+            threads.remove(thread)
+        print("FILES IN QUEUE: {0}".format(len(files)))
+        print("FILES TRANSFERED: {0}".format(len(transfered)))
         print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
+
 
 def iterate(folder=""):
     list_opts = {
-        'max_entries': 1000,
+        'max_entries': jobs*10,
         'encoding': 'utf-8',
         'end': root + '0'
     }
@@ -111,27 +112,28 @@ def iterate(folder=""):
     tree = ETree.fromstring(response.content)
     try:
         resume = tree.find('resume').get('start')
+        count = 0
         for child in tree:
             if child.get('type') == 'file':
                 file = child.get('name')
-                files.append(file)
+                files.append(file) #TODO filter out based on bitrate
                 manage_threads(file)
+                count += 1
     except AttributeError:
         resume = None
 
     return resume
 
 if __name__ == "__main__":
-    while True:
+    try:
         dir = iterate(root)
-        if len(files) > jobs:
-            print("FILES FOUND: {0}".format(len(files)))
-            for thread in threads:
-                thread.start()
-                semaphore.acquire()
-            for thread in threads:
-                thread.join()
-                threads.remove(thread)
-        if not dir and len(files) == len(transfered):
-            break
+        while True:
+            while dir and len(files) < jobs: 
+                dir = iterate(dir)
+            if files:
+                manage_threads()
+            if not dir and not files:
+                break
+    except Exception as e:
+        print(e)
     print('done')

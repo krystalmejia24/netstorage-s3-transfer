@@ -1,2 +1,4 @@
+git+https://github.com/krystalmejia24/smart_open.git@http-headers#egg=smart_open
+netstorageapi
 boto3
 python-dotenv
