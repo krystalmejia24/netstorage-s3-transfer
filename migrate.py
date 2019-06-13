@@ -12,10 +12,11 @@ from xml.etree import ElementTree as ETree
 from smart_open import open as sopen
 from dotenv import load_dotenv
 
-
-logging.basicConfig(level=logging.ERROR,
-                    format='(%(threadName)-10s) %(message)s',
-                    )
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(threadName)-12s %(levelname)-8s %(message)s',
+                    datefmt='%m-%d %H:%M',
+                    filename='logs/temp.log',
+                    filemode='w')
 
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
@@ -38,8 +39,9 @@ session = boto3.Session(
 jobs = int(os.getenv("JOBS"))
 semaphore = threading.Semaphore(jobs)
 threads = []
-files = []
 transfered = []
+files = {}
+prism = {}
 
 def auth(path):
     acs_action = 'version=1&action=download'
@@ -60,35 +62,44 @@ def auth(path):
 
     return headers
 
-def destination(file):
+def destination(file, otfp=False):
     path = file.replace(root, "")
-    return "s3://{0}/test/local{1}".format(s3_bucket, path)
+    if not otfp:
+        return "s3://{0}/test/local{1}".format(s3_bucket, path)
+    else:
+        return path
 
-def transfer(file=None):
-    if file:
-        file = "/{0}".format(file)
-        url = "http://{0}{1}".format(ns_host, file)
-        bucket = destination(file)
-        try:
-            with sopen(url, 'rb', transport_params=dict(headers=auth(file), buffer_size=1024*500)) as fin:
-                with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
-                    while True:
-                        buffer = fin.read(1024*2)
-                        if not buffer:
-                            fin.close()
-                            break
-                        else:
-                            fout.write(buffer)
-            transfered.append(file)
-            files.remove(file[1:])
-            semaphore.release()
-        except Exception as e:
-            print(e)
+def cleanup(file, mpx_id):
+    transfered.append(file)
+    del files[file]
+    prism[mpx_id].remove(file)
+    print(len(prism[mpx_id]))
+    if mpx_id not in files.values() and len(prism[mpx_id]) == 1: 
+        print(prism[mpx_id]) #TODO ADD TO LOG FILE AND DELETE KEY
+    semaphore.release()
 
-def manage_threads(file=False):
+def transfer(file, mpx_id):
+    url = "http://{0}{1}".format(ns_host, file)
+    bucket = destination(file)
+    try:
+        with sopen(url, 'rb', 1024*500, transport_params=dict(headers=auth(file))) as fin:
+            with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
+                while True:
+                    buffer = fin.read(1024)
+                    if not buffer:
+                        fin.close()
+                        break
+                    else:
+                        fout.write(buffer)
+        cleanup(file, mpx_id)
+    except Exception as e:
+        ##TODO REQUEUE ITEM if failed
+        print(e)
+
+def manage_threads(file=False, mpx_id=""):
     if file:
         name = file.split('/')[-1]
-        t = threading.Thread(name=name, target=transfer, args=(file,))
+        t = threading.Thread(name=name, target=transfer, args=(file,mpx_id,))
         threads.append(t)
     else:
         for thread in threads[:jobs]:
@@ -97,9 +108,34 @@ def manage_threads(file=False):
         for thread in threads[:jobs]:
             thread.join()
             threads.remove(thread)
-        print("FILES IN QUEUE: {0}".format(len(files)))
+        #TODO add log file with these stats
+        print("FILES IN QUEUE: {0}".format(len(files.keys())))
         print("FILES TRANSFERED: {0}".format(len(transfered)))
-        print("NUMBER OF ACTIVE THREADS: {0}".format(threading.active_count()))
+
+def filter_renditions(path, mpx_id):
+    directory = "/" + '/'.join(path.split('/')[:-1])
+    status, response = ns.dir(directory, {'encoding': 'utf-8'})
+    tree = ETree.fromstring(response.content)
+    renditions = {}
+    otfp_url = None 
+
+    for child in tree:
+        if child.get('type') == 'file':
+            file = child.get('name')
+            r = file.split('_')[-1].replace(".mp4", "")
+            renditions[int(r)] = file
+
+    for i in sorted(renditions.keys(), reverse=True)[:3]:
+        file = "{0}/{1}".format(directory, renditions[i])
+        files[file] = mpx_id
+        prism[mpx_id].append(file)
+        manage_threads(file, mpx_id)
+        if not otfp_url:
+            otfp_url = "{0}/{1},".format(destination(directory, True), renditions[i].replace('.mp4', ''))
+        else:
+            otfp_url += "{0},".format(i)
+
+    prism[mpx_id].append("{0}master.m3u8".format(otfp_url))
 
 
 def iterate(folder=""):
@@ -112,13 +148,13 @@ def iterate(folder=""):
     tree = ETree.fromstring(response.content)
     try:
         resume = tree.find('resume').get('start')
-        count = 0
         for child in tree:
             if child.get('type') == 'file':
                 file = child.get('name')
-                files.append(file) #TODO filter out based on bitrate
-                manage_threads(file)
-                count += 1
+                mpx_id = file.split('/')[-2]
+                if mpx_id not in prism:
+                    prism[mpx_id] = []
+                    filter_renditions(file, mpx_id)
     except AttributeError:
         resume = None
 
@@ -128,7 +164,7 @@ if __name__ == "__main__":
     try:
         dir = iterate(root)
         while True:
-            while dir and len(files) < jobs: 
+            while dir and len(files.keys()) < jobs: 
                 dir = iterate(dir)
             if files:
                 manage_threads()
