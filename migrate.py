@@ -12,14 +12,6 @@ from xml.etree import ElementTree as ETree
 from smart_open import open as sopen
 from dotenv import load_dotenv
 
-"""
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s %(threadName)-12s %(levelname)-8s %(message)s',
-                    datefmt='%m-%d %H:%M',
-                    filename='logs/temp.log',
-                    filemode='w')
-"""
-
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 
@@ -42,27 +34,28 @@ jobs = int(os.getenv("JOBS"))
 semaphore = threading.Semaphore(jobs)
 threads = []
 transfered = []
-files = {}
 prism = {}
 
 def setup_logger(name, file):
     logger = logging.getLogger(name)
 
-    formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-4s %(threadName)-4s %(message)s',
-                                  datefmt= '%m-%d %H:%M')
+    if name == "prism":
+        fmt = '%(message)s'
+    else:
+        fmt = '%(asctime)s %(levelname)-4s %(threadName)-4s %(message)s'
+    formatter = logging.Formatter(fmt=fmt, datefmt= '%m-%d %H:%M')
 
     fileHandler = logging.FileHandler(file, mode='a')
     fileHandler.setFormatter(formatter)
 
     logger.setLevel(logging.INFO)
     logger.addHandler(fileHandler)
-    logger.addHandler(streamHandler)
 
 def logger(msg, name, level='info'):
     if name == 'thread': 
         log = logging.getLogger('thread')
-    if name == 'stats': 
-        log = logging.getLogger('stats')
+    if name == 'info': 
+        log = logging.getLogger('info')
     if name == 'prism': 
         log = logging.getLogger('prism')
 
@@ -109,6 +102,8 @@ def cleanup(file, mpx_id):
     semaphore.release()
 
 def transfer(file, mpx_id):
+    setup_logger("thread", "threads.log")
+    global logger
     url = "http://{0}{1}".format(ns_host, file)
     bucket = destination(file)
     try:
@@ -125,7 +120,7 @@ def transfer(file, mpx_id):
     except Exception as e:
         ##TODO REQUEUE ITEM if failed
         logger(e, 'threads', 'error')
-        logger("Following was not transferred {0}".format(file), 'stats', 'error')
+        logger("Following was not transferred {0}".format(file), 'info', 'error')
 
 
 def manage_threads(file=False, mpx_id=""):
@@ -141,9 +136,21 @@ def manage_threads(file=False, mpx_id=""):
         for thread in threads[:jobs]:
             thread.join()
             threads.remove(thread)
-        #TODO add log file with these stats
-        logger("FILES IN QUEUE: {0}".format(count), 'stats')
-        logger("FILES TRANSFERED: {0}".format(len(transfered)), 'stats')
+        #TODO add log file with these info
+        logger("FILES IN QUEUE: {0}".format(count), 'info')
+        logger("FILES TRANSFERED: {0}".format(len(transfered)), 'info')
+
+
+
+def generate_otfp(path, renditions): #renditions is a dictionary with a key,value of rendition,file
+    otfp_url = None
+    for i in sorted(renditions.keys(), reverse=True)[:3]:
+        if not otfp_url:
+            otfp_url = "{0}/{1},".format(destination(path, True), renditions[i].replace('.mp4', ''))
+        else:
+            otfp_url += "{0},".format(i)
+
+    return ("{0}master.m3u8".format(otfp_url))
 
 def filter_renditions(path, mpx_id):
     global count
@@ -151,7 +158,7 @@ def filter_renditions(path, mpx_id):
     status, response = ns.dir(directory, {'encoding': 'utf-8'})
     tree = ETree.fromstring(response.content)
     renditions = {}
-    otfp_url = None 
+    otfp_url = {}
 
     for child in tree:
         if child.get('type') == 'file':
@@ -159,17 +166,13 @@ def filter_renditions(path, mpx_id):
             r = file.split('_')[-1].replace(".mp4", "")
             renditions[int(r)] = file
 
-    for i in sorted(renditions.keys(), reverse=True)[:3]:
+    for i in sorted(renditions.keys(),  reverse=True)[:3]:
         file = "{0}/{1}".format(directory, renditions[i])
         prism[mpx_id].append(file)
         count += 1
         manage_threads(file, mpx_id)
-        if not otfp_url:
-            otfp_url = "{0}/{1},".format(destination(directory, True), renditions[i].replace('.mp4', ''))
-        else:
-            otfp_url += "{0},".format(i)
-
-    prism[mpx_id].append("{0}master.m3u8".format(otfp_url))
+    
+    prism[mpx_id].append(generate_otfp(directory, renditions))
 
 
 def iterate(folder=""):
@@ -197,11 +200,10 @@ def iterate(folder=""):
 if __name__ == "__main__":
     global count
     count = 0
-    setup_logger("thread", "threads.log")
-    setup_logger("stats", "stats.log")
+    setup_logger("info", "info.log")
     setup_logger("prism", "prism.log")
     try:
-        dir = iterate(root)
+        dir = iterate(root+"/2019")
         while True:
             while dir and count < jobs: 
                 dir = iterate(dir)
@@ -210,5 +212,5 @@ if __name__ == "__main__":
             if not dir and not count:
                 break
     except Exception as e:
-        logger(e, 'stats', 'error')
-    logger('done', 'stats')
+        logger(e, 'info', 'error')
+    logger('done', 'info')
