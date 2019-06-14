@@ -4,3 +4,4 @@
 sopen
 .python-version
 logs
+*.log

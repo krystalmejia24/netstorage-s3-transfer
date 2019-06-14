@@ -12,11 +12,13 @@ from xml.etree import ElementTree as ETree
 from smart_open import open as sopen
 from dotenv import load_dotenv
 
-logging.basicConfig(level=logging.DEBUG,
+"""
+logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(threadName)-12s %(levelname)-8s %(message)s',
                     datefmt='%m-%d %H:%M',
                     filename='logs/temp.log',
                     filemode='w')
+"""
 
 env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
@@ -43,6 +45,32 @@ transfered = []
 files = {}
 prism = {}
 
+def setup_logger(name, file):
+    logger = logging.getLogger(name)
+
+    formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-4s %(threadName)-4s %(message)s',
+                                  datefmt= '%m-%d %H:%M')
+
+    fileHandler = logging.FileHandler(file, mode='a')
+    fileHandler.setFormatter(formatter)
+
+    logger.setLevel(logging.INFO)
+    logger.addHandler(fileHandler)
+    logger.addHandler(streamHandler)
+
+def logger(msg, name, level='info'):
+    if name == 'thread': 
+        log = logging.getLogger('thread')
+    if name == 'stats': 
+        log = logging.getLogger('stats')
+    if name == 'prism': 
+        log = logging.getLogger('prism')
+
+    if level == 'info':
+        log.info(msg)
+    if level == 'error':
+        log.info(msg)
+
 def auth(path):
     acs_action = 'version=1&action=download'
     acs_auth_data = "5, 0.0.0.0, 0.0.0.0, {0}, {1}, {2}".format(
@@ -65,17 +93,19 @@ def auth(path):
 def destination(file, otfp=False):
     path = file.replace(root, "")
     if not otfp:
-        return "s3://{0}/test/local{1}".format(s3_bucket, path)
+        return "s3://{0}{1}".format(s3_bucket, path)
     else:
         return path
 
 def cleanup(file, mpx_id):
+    global count
     transfered.append(file)
-    del files[file]
+    logger('transfered {0}'.format(file), 'thread')
     prism[mpx_id].remove(file)
-    print(len(prism[mpx_id]))
-    if mpx_id not in files.values() and len(prism[mpx_id]) == 1: 
-        print(prism[mpx_id]) #TODO ADD TO LOG FILE AND DELETE KEY
+    if len(prism[mpx_id]) == 1: 
+        logger(prism[mpx_id], 'prism')
+        del prism[mpx_id]
+    count -= 1
     semaphore.release()
 
 def transfer(file, mpx_id):
@@ -85,7 +115,7 @@ def transfer(file, mpx_id):
         with sopen(url, 'rb', 1024*500, transport_params=dict(headers=auth(file))) as fin:
             with sopen(bucket, 'wb', transport_params=dict(session=session)) as fout:
                 while True:
-                    buffer = fin.read(1024)
+                    buffer = fin.read(1024*2)
                     if not buffer:
                         fin.close()
                         break
@@ -94,9 +124,12 @@ def transfer(file, mpx_id):
         cleanup(file, mpx_id)
     except Exception as e:
         ##TODO REQUEUE ITEM if failed
-        print(e)
+        logger(e, 'threads', 'error')
+        logger("Following was not transferred {0}".format(file), 'stats', 'error')
+
 
 def manage_threads(file=False, mpx_id=""):
+    global count
     if file:
         name = file.split('/')[-1]
         t = threading.Thread(name=name, target=transfer, args=(file,mpx_id,))
@@ -109,10 +142,11 @@ def manage_threads(file=False, mpx_id=""):
             thread.join()
             threads.remove(thread)
         #TODO add log file with these stats
-        print("FILES IN QUEUE: {0}".format(len(files.keys())))
-        print("FILES TRANSFERED: {0}".format(len(transfered)))
+        logger("FILES IN QUEUE: {0}".format(count), 'stats')
+        logger("FILES TRANSFERED: {0}".format(len(transfered)), 'stats')
 
 def filter_renditions(path, mpx_id):
+    global count
     directory = "/" + '/'.join(path.split('/')[:-1])
     status, response = ns.dir(directory, {'encoding': 'utf-8'})
     tree = ETree.fromstring(response.content)
@@ -127,8 +161,8 @@ def filter_renditions(path, mpx_id):
 
     for i in sorted(renditions.keys(), reverse=True)[:3]:
         file = "{0}/{1}".format(directory, renditions[i])
-        files[file] = mpx_id
         prism[mpx_id].append(file)
+        count += 1
         manage_threads(file, mpx_id)
         if not otfp_url:
             otfp_url = "{0}/{1},".format(destination(directory, True), renditions[i].replace('.mp4', ''))
@@ -161,15 +195,20 @@ def iterate(folder=""):
     return resume
 
 if __name__ == "__main__":
+    global count
+    count = 0
+    setup_logger("thread", "threads.log")
+    setup_logger("stats", "stats.log")
+    setup_logger("prism", "prism.log")
     try:
         dir = iterate(root)
         while True:
-            while dir and len(files.keys()) < jobs: 
+            while dir and count < jobs: 
                 dir = iterate(dir)
-            if files:
+            if count:
                 manage_threads()
-            if not dir and not files:
+            if not dir and not count:
                 break
     except Exception as e:
-        print(e)
-    print('done')
+        logger(e, 'stats', 'error')
+    logger('done', 'stats')
