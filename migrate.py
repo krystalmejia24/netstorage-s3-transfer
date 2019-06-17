@@ -7,6 +7,7 @@ import base64
 import os
 import threading
 import logging
+import sys
 from akamai.netstorage import Netstorage, NetstorageError
 from xml.etree import ElementTree as ETree
 from smart_open import open as sopen
@@ -16,7 +17,11 @@ env_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(env_path)
 
 #netstorage 
-root = "/{0}".format(os.getenv("NS_PATH"))
+root = os.getenv("NS_PATH")
+if not root.startswith("/"):
+    root = "/{0}".format(root)
+if root.endswith("/"):
+    root = root[:-1]
 ns_host = os.getenv("NS_HOST")
 key = os.getenv("NS_KEY")
 keyname = os.getenv("NS_KEYNAME")
@@ -33,7 +38,6 @@ session = boto3.Session(
 jobs = int(os.getenv("JOBS"))
 semaphore = threading.Semaphore(jobs)
 threads = []
-transfered = []
 prism = {}
 
 def setup_logger(name, file):
@@ -51,6 +55,7 @@ def setup_logger(name, file):
     logger.setLevel(logging.INFO)
     logger.addHandler(fileHandler)
 
+
 def logger(msg, name, level='info'):
     if name == 'thread': 
         log = logging.getLogger('thread')
@@ -62,7 +67,8 @@ def logger(msg, name, level='info'):
     if level == 'info':
         log.info(msg)
     if level == 'error':
-        log.info(msg)
+        log.error(msg)
+
 
 def auth(path):
     acs_action = 'version=1&action=download'
@@ -83,6 +89,7 @@ def auth(path):
 
     return headers
 
+
 def destination(file, otfp=False):
     path = file.replace(root, "")
     if not otfp:
@@ -90,20 +97,20 @@ def destination(file, otfp=False):
     else:
         return path
 
+
 def cleanup(file, mpx_id):
-    global count
-    transfered.append(file)
-    logger('transfered {0}'.format(file), 'thread')
+    global nFiles, nTransferred
+    nTransferred += 1
+    logger('transfered {0}'.format(file), 'info')
     prism[mpx_id].remove(file)
     if len(prism[mpx_id]) == 1: 
-        logger(prism[mpx_id], 'prism')
+        logger("{0} {1} '{2}'".format(mpx_id, s3_bucket, prism[mpx_id][0]), 'prism')
         del prism[mpx_id]
-    count -= 1
+    nFiles -= 1
     semaphore.release()
 
+
 def transfer(file, mpx_id):
-    setup_logger("thread", "threads.log")
-    global logger
     url = "http://{0}{1}".format(ns_host, file)
     bucket = destination(file)
     try:
@@ -116,15 +123,16 @@ def transfer(file, mpx_id):
                         break
                     else:
                         fout.write(buffer)
+
         cleanup(file, mpx_id)
     except Exception as e:
-        ##TODO REQUEUE ITEM if failed
+        manage_threads(file, mpx_id)
         logger(e, 'threads', 'error')
-        logger("Following was not transferred {0}".format(file), 'info', 'error')
+        logger("NOT TRANSFERED - {0}".format(file), 'info', 'error')
 
 
 def manage_threads(file=False, mpx_id=""):
-    global count
+    global nFiles, nTransferred
     if file:
         name = file.split('/')[-1]
         t = threading.Thread(name=name, target=transfer, args=(file,mpx_id,))
@@ -136,10 +144,8 @@ def manage_threads(file=False, mpx_id=""):
         for thread in threads[:jobs]:
             thread.join()
             threads.remove(thread)
-        #TODO add log file with these info
-        logger("FILES IN QUEUE: {0}".format(count), 'info')
-        logger("FILES TRANSFERED: {0}".format(len(transfered)), 'info')
-
+        logger("FILES IN QUEUE: {0}".format(nFiles), 'info')
+        logger("FILES TRANSFERED: {0}".format(nTransferred), 'info')
 
 
 def generate_otfp(path, renditions): #renditions is a dictionary with a key,value of rendition,file
@@ -152,8 +158,9 @@ def generate_otfp(path, renditions): #renditions is a dictionary with a key,valu
 
     return ("{0}master.m3u8".format(otfp_url))
 
+
 def filter_renditions(path, mpx_id):
-    global count
+    global nFiles
     directory = "/" + '/'.join(path.split('/')[:-1])
     status, response = ns.dir(directory, {'encoding': 'utf-8'})
     tree = ETree.fromstring(response.content)
@@ -169,17 +176,18 @@ def filter_renditions(path, mpx_id):
     for i in sorted(renditions.keys(),  reverse=True)[:3]:
         file = "{0}/{1}".format(directory, renditions[i])
         prism[mpx_id].append(file)
-        count += 1
+        nFiles += 1
         manage_threads(file, mpx_id)
     
     prism[mpx_id].append(generate_otfp(directory, renditions))
 
 
-def iterate(folder=""):
+def iterate(folder, end):
+    global nFiles
     list_opts = {
         'max_entries': jobs*10,
         'encoding': 'utf-8',
-        'end': root + '0'
+        'end': end + '0'
     }
     status, response = ns.list(folder, list_opts)
     tree = ETree.fromstring(response.content)
@@ -195,22 +203,45 @@ def iterate(folder=""):
     except AttributeError:
         resume = None
 
+    logger("RESUME {0}".format(resume), 'info')
+
     return resume
 
+
 if __name__ == "__main__":
-    global count
-    count = 0
     setup_logger("info", "info.log")
     setup_logger("prism", "prism.log")
+    setup_logger("threads", "threads.log")
+    global nFiles, nTransferred
+    nTransferred = 0
+    nFiles = 0                               #Number of files ready for transfer
+    start = root                            #directory to start iterating
+    end = root                              #directory to end iterating
+
+    if len(sys.argv) > 1 and sys.argv[1] not in ['resume', 'start']:
+        print('Usage:')
+        print(f'python {sys.argv[0]} start [optional_sub_directory]')
+        print(f'python {sys.argv[0]} resume [file_last_transfered]')
+        sys.exit(-1)
+    elif len(sys.argv) > 2 and sys.argv[1] == 'start':
+        if sys.argv[2].startswith('/'):
+            start = "{0}{1}".format(root, sys.argv[2])
+        else: 
+            start = "{0}/{1}".format(root, sys.argv[2])
+        end = start
+    elif  len(sys.argv) > 2 and sys.argv[1] == 'resume':
+        start = sys.argv[2]
+
     try:
-        dir = iterate(root+"/2019")
+        dir = iterate(start, end)
         while True:
-            while dir and count < jobs: 
-                dir = iterate(dir)
-            if count:
+            while dir and nFiles < jobs: 
+                dir = iterate(dir, end)
+            if nFiles:
                 manage_threads()
-            if not dir and not count:
+            if not dir and not nFiles:
                 break
     except Exception as e:
         logger(e, 'info', 'error')
-    logger('done', 'info')
+
+    print('DONE')
