@@ -57,8 +57,8 @@ def setup_logger(name, file):
 
 
 def logger(msg, name, level='info'):
-    if name == 'thread': 
-        log = logging.getLogger('thread')
+    if name == 'threads': 
+        log = logging.getLogger('threads')
     if name == 'info': 
         log = logging.getLogger('info')
     if name == 'prism': 
