@@ -190,7 +190,7 @@ def filter_renditions(path, mpx_id):
 def iterate(folder, end):
     global nFiles
     list_opts = {
-        'max_entries': 1000,
+        'max_entries': jobs*10,
         'encoding': 'utf-8',
         'end': end + '0'
     }
