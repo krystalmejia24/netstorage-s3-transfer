@@ -171,21 +171,26 @@ def filter_renditions(path, mpx_id):
         if child.get('type') == 'file':
             file = child.get('name')
             r = file.split('_')[-1].replace(".mp4", "")
-            renditions[int(r)] = file
+            try:
+                renditions[int(r)] = file
+            except Exception as e:
+                logger("INVALID FORMAT FOR EXTRACTING RENDTIONS", 'info', 'error')
+                logger("{0}/{1}".format(directory, file), 'info', 'error')
 
-    for i in sorted(renditions.keys(),  reverse=True)[:3]:
-        file = "{0}/{1}".format(directory, renditions[i])
-        prism[mpx_id].append(file)
-        nFiles += 1
-        manage_threads(file, mpx_id)
-    
-    prism[mpx_id].append(generate_otfp(directory, renditions))
+    if renditions:
+        for i in sorted(renditions.keys(),  reverse=True)[:3]:
+            file = "{0}/{1}".format(directory, renditions[i])
+            prism[mpx_id].append(file)
+            nFiles += 1
+            manage_threads(file, mpx_id)
+        
+        prism[mpx_id].append(generate_otfp(directory, renditions))
 
 
 def iterate(folder, end):
     global nFiles
     list_opts = {
-        'max_entries': jobs*10,
+        'max_entries': 1000,
         'encoding': 'utf-8',
         'end': end + '0'
     }

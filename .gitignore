@@ -5,3 +5,5 @@ sopen
 .python-version
 logs
 *.log
+.pytest_cache
+__pycache__
